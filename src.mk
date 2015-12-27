@@ -2,6 +2,8 @@
 LIB_SOURCES =                                                   \
   db/builder.cc                                                 \
   db/c.cc                                                       \
+  db/ascylib_aux/ssalloc.cc                                     \
+  db/ascylib_external/src/ssmem.cc                              \
   db/column_family.cc                                           \
   db/compacted_db_impl.cc                                       \
   db/compaction.cc                                              \

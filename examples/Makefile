@@ -1,5 +1,10 @@
 include ../make_config.mk
 
+CFLAGS += -I.. -I../include -I../db/atomic_ops -I../db/ascylib_aux -I../db/ascylib_external/include $(PLATFORM_CCFLAGS) $(OPT)
+CXXFLAGS += -I.. -I../include -I../db/atomic_ops -I../db/ascylib_aux -I../db/ascylib_external/include $(PLATFORM_CXXFLAGS) $(OPT)
+
+include Makefile.common.ascylib
+
 .PHONY: clean librocksdb
 
 all: simple_example column_families_example compact_files_example c_simple_example optimistic_transaction_example transaction_example

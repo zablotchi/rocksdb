@@ -56,6 +56,11 @@ class Slice {
   // Return true iff the length of the referenced data is zero
   bool empty() const { return size_ == 0; }
 
+  void assign(const char* p, size_t n) {
+    data_ = p;
+    size_ = n;
+  }
+
   // Return the ith byte in the referenced data.
   // REQUIRES: n < size()
   char operator[](size_t n) const {

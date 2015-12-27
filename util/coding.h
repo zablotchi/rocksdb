@@ -85,6 +85,18 @@ inline uint32_t DecodeFixed32(const char* ptr) {
   }
 }
 
+inline void IntToSlice (Slice& s, char* buf, uint64_t input) {
+  buf[7] =  input & 0xff;
+  buf[6] = (input >> 8) & 0xff;
+  buf[5] = (input >> 16) & 0xff;
+  buf[4] = (input >> 24) & 0xff;
+  buf[3] = (input >> 32) & 0xff;
+  buf[2] = (input >> 40) & 0xff;
+  buf[1] = (input >> 48) & 0xff;
+  buf[0] = (input >> 56) & 0xff;
+  s.assign(buf, sizeof(input));
+}
+
 inline uint64_t DecodeFixed64(const char* ptr) {
   if (port::kLittleEndian) {
     // Load the raw bytes
