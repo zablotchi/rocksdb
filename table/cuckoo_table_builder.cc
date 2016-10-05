@@ -1,4 +1,4 @@
-//  Copyright (c) 2014, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -52,7 +52,8 @@ CuckooTableBuilder::CuckooTableBuilder(
     uint32_t max_num_hash_table, uint32_t max_search_depth,
     const Comparator* user_comparator, uint32_t cuckoo_block_size,
     bool use_module_hash, bool identity_as_first_hash,
-    uint64_t (*get_slice_hash)(const Slice&, uint32_t, uint64_t))
+    uint64_t (*get_slice_hash)(const Slice&, uint32_t, uint64_t),
+    uint32_t column_family_id, const std::string& column_family_name)
     : num_hash_func_(2),
       file_(file),
       max_hash_table_ratio_(max_hash_table_ratio),
@@ -76,6 +77,8 @@ CuckooTableBuilder::CuckooTableBuilder(
   properties_.num_data_blocks = 1;
   properties_.index_size = 0;
   properties_.filter_size = 0;
+  properties_.column_family_id = column_family_id;
+  properties_.column_family_name = column_family_name;
 }
 
 void CuckooTableBuilder::Add(const Slice& key, const Slice& value) {
@@ -246,7 +249,7 @@ Status CuckooTableBuilder::Finish() {
   if (num_entries_ > 0) {
     // Calculate the real hash size if module hash is enabled.
     if (use_module_hash_) {
-      hash_table_size_ = 
+      hash_table_size_ =
         static_cast<uint64_t>(num_entries_ / max_hash_table_ratio_);
     }
     s = MakeHashTable(&buckets);

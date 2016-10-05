@@ -1,4 +1,4 @@
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -43,8 +43,7 @@ DEFINE_int64(write_buffer_size, 33554432, "");
 DEFINE_int32(max_write_buffer_number, 2, "");
 DEFINE_int32(min_write_buffer_number_to_merge, 1, "");
 DEFINE_int32(skiplist_height, 4, "");
-DEFINE_int32(memtable_prefix_bloom_bits, 10000000, "");
-DEFINE_int32(memtable_prefix_bloom_probes, 10, "");
+DEFINE_double(memtable_prefix_bloom_size_ratio, 0.1, "");
 DEFINE_int32(memtable_prefix_bloom_huge_page_tlb_size, 2 * 1024 * 1024, "");
 DEFINE_int32(value_size, 40, "");
 
@@ -160,8 +159,8 @@ class PrefixTest : public testing::Test {
     options.min_write_buffer_number_to_merge =
       FLAGS_min_write_buffer_number_to_merge;
 
-    options.memtable_prefix_bloom_bits = FLAGS_memtable_prefix_bloom_bits;
-    options.memtable_prefix_bloom_probes = FLAGS_memtable_prefix_bloom_probes;
+    options.memtable_prefix_bloom_size_ratio =
+        FLAGS_memtable_prefix_bloom_size_ratio;
     options.memtable_prefix_bloom_huge_page_tlb_size =
         FLAGS_memtable_prefix_bloom_huge_page_tlb_size;
 
@@ -446,6 +445,10 @@ TEST_F(PrefixTest, PrefixValid) {
       iter->Next();
       ASSERT_FALSE(iter->Valid());
       ASSERT_EQ(kNotFoundResult, Get(db.get(), read_options, 12346, 8));
+
+      // Verify seeking past the prefix won't return a result.
+      SeekIterator(iter.get(), 12345, 10);
+      ASSERT_TRUE(!iter->Valid());
     }
   }
 }

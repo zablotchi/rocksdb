@@ -1,4 +1,4 @@
-//  Copyright (c) 2014, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -361,6 +361,18 @@ bool ParseOptionHelper(char* opt_address, const OptionType& opt_type,
       return ParseEnum<EncodingType>(
           encoding_type_string_map, value,
           reinterpret_cast<EncodingType*>(opt_address));
+    case OptionType::kWALRecoveryMode:
+      return ParseEnum<WALRecoveryMode>(
+          wal_recovery_mode_string_map, value,
+          reinterpret_cast<WALRecoveryMode*>(opt_address));
+    case OptionType::kAccessHint:
+      return ParseEnum<DBOptions::AccessHint>(
+          access_hint_string_map, value,
+          reinterpret_cast<DBOptions::AccessHint*>(opt_address));
+    case OptionType::kInfoLogLevel:
+      return ParseEnum<InfoLogLevel>(
+          info_log_level_string_map, value,
+          reinterpret_cast<InfoLogLevel*>(opt_address));
     default:
       return false;
   }
@@ -498,6 +510,18 @@ bool SerializeSingleOptionHelper(const char* opt_address,
       return SerializeEnum<EncodingType>(
           encoding_type_string_map,
           *reinterpret_cast<const EncodingType*>(opt_address), value);
+    case OptionType::kWALRecoveryMode:
+      return SerializeEnum<WALRecoveryMode>(
+          wal_recovery_mode_string_map,
+          *reinterpret_cast<const WALRecoveryMode*>(opt_address), value);
+    case OptionType::kAccessHint:
+      return SerializeEnum<DBOptions::AccessHint>(
+          access_hint_string_map,
+          *reinterpret_cast<const DBOptions::AccessHint*>(opt_address), value);
+    case OptionType::kInfoLogLevel:
+      return SerializeEnum<InfoLogLevel>(
+          info_log_level_string_map,
+          *reinterpret_cast<const InfoLogLevel*>(opt_address), value);
     default:
       return false;
   }
@@ -513,16 +537,18 @@ bool ParseMemtableOptions(const std::string& name, const std::string& value,
   } else if (name == "arena_block_size") {
     new_options->arena_block_size = ParseSizeT(value);
   } else if (name == "memtable_prefix_bloom_bits") {
-    new_options->memtable_prefix_bloom_bits = ParseUint32(value);
+    // deprecated
+  } else if (name == "memtable_prefix_bloom_size_ratio") {
+    new_options->memtable_prefix_bloom_size_ratio = ParseDouble(value);
   } else if (name == "memtable_prefix_bloom_probes") {
-    new_options->memtable_prefix_bloom_probes = ParseUint32(value);
+    // Deprecated
   } else if (name == "memtable_prefix_bloom_huge_page_tlb_size") {
     new_options->memtable_prefix_bloom_huge_page_tlb_size =
       ParseSizeT(value);
   } else if (name == "max_successive_merges") {
     new_options->max_successive_merges = ParseSizeT(value);
   } else if (name == "filter_deletes") {
-    new_options->filter_deletes = ParseBoolean(name, value);
+    // Deprecated
   } else if (name == "max_write_buffer_number") {
     new_options->max_write_buffer_number = ParseInt(value);
   } else if (name == "inplace_update_num_locks") {
@@ -598,6 +624,16 @@ bool ParseMiscOptions(const std::string& name, const std::string& value,
     new_options->max_sequential_skip_in_iterations = ParseUint64(value);
   } else if (name == "paranoid_file_checks") {
     new_options->paranoid_file_checks = ParseBoolean(name, value);
+  } else if (name == "report_bg_io_stats") {
+    new_options->report_bg_io_stats = ParseBoolean(name, value);
+  } else if (name == "compression") {
+    bool is_ok = ParseEnum<CompressionType>(compression_type_string_map, value,
+                                            &new_options->compression);
+    if (!is_ok) {
+      return false;
+    }
+  } else if (name == "min_partial_merge_operands") {
+    new_options->min_partial_merge_operands = ParseUint32(value);
   } else {
     return false;
   }
@@ -786,8 +822,19 @@ Status ParseColumnFamilyOption(const std::string& name,
         return Status::InvalidArgument(
             "unable to parse the specified CF option " + name);
       }
+      end = value.find(':', start);
       new_options->compression_opts.strategy =
           ParseInt(value.substr(start, value.size() - start));
+      // max_dict_bytes is optional for backwards compatibility
+      if (end != std::string::npos) {
+        start = end + 1;
+        if (start >= value.size()) {
+          return Status::InvalidArgument(
+              "unable to parse the specified CF option " + name);
+        }
+        new_options->compression_opts.max_dict_bytes =
+            ParseInt(value.substr(start, value.size() - start));
+      }
     } else if (name == "compaction_options_fifo") {
       new_options->compaction_options_fifo.max_table_files_size =
           ParseUint64(value);
@@ -798,13 +845,15 @@ Status ParseColumnFamilyOption(const std::string& name,
             "Unable to parse the specified CF option " + name);
       }
       const auto& opt_info = iter->second;
-      if (ParseOptionHelper(
+      if (opt_info.verification != OptionVerificationType::kDeprecated &&
+          ParseOptionHelper(
               reinterpret_cast<char*>(new_options) + opt_info.offset,
               opt_info.type, value)) {
         return Status::OK();
       }
       switch (opt_info.verification) {
         case OptionVerificationType::kByName:
+        case OptionVerificationType::kByNameAllowNull:
           return Status::NotSupported(
               "Deserializing the specified CF option " + name +
                   " is not supported");
@@ -909,6 +958,17 @@ Status GetStringFromColumnFamilyOptions(std::string* opt_string,
   return Status::OK();
 }
 
+Status GetStringFromCompressionType(std::string* compression_str,
+                                    CompressionType compression_type) {
+  bool ok = SerializeEnum<CompressionType>(compression_type_string_map,
+                                           compression_type, compression_str);
+  if (ok) {
+    return Status::OK();
+  } else {
+    return Status::InvalidArgument("Invalid compression types");
+  }
+}
+
 bool SerializeSingleBlockBasedTableOption(
     std::string* opt_string, const BlockBasedTableOptions& bbt_options,
     const std::string& name, const std::string& delimiter) {
@@ -978,13 +1038,15 @@ Status ParseDBOption(const std::string& name,
         return Status::InvalidArgument("Unrecognized option DBOptions:", name);
       }
       const auto& opt_info = iter->second;
-      if (ParseOptionHelper(
+      if (opt_info.verification != OptionVerificationType::kDeprecated &&
+          ParseOptionHelper(
               reinterpret_cast<char*>(new_options) + opt_info.offset,
               opt_info.type, value)) {
         return Status::OK();
       }
       switch (opt_info.verification) {
         case OptionVerificationType::kByName:
+        case OptionVerificationType::kByNameAllowNull:
           return Status::NotSupported(
               "Deserializing the specified DB option " + name +
                   " is not supported");
@@ -1082,6 +1144,8 @@ Status GetBlockBasedTableOptionsFromMap(
                                      // the old API, where everything is
                                      // parsable.
           (iter->second.verification != OptionVerificationType::kByName &&
+           iter->second.verification !=
+               OptionVerificationType::kByNameAllowNull &&
            iter->second.verification != OptionVerificationType::kDeprecated)) {
         return Status::InvalidArgument("Can't parse BlockBasedTableOptions:",
                                        o.first + " " + error_message);
@@ -1116,10 +1180,12 @@ Status GetPlainTableOptionsFromMap(
     if (error_message != "") {
       const auto iter = plain_table_type_info.find(o.first);
       if (iter == plain_table_type_info.end() ||
-          !input_strings_escaped ||// !input_strings_escaped indicates
-                                   // the old API, where everything is
-                                   // parsable.
+          !input_strings_escaped ||  // !input_strings_escaped indicates
+                                     // the old API, where everything is
+                                     // parsable.
           (iter->second.verification != OptionVerificationType::kByName &&
+           iter->second.verification !=
+               OptionVerificationType::kByNameAllowNull &&
            iter->second.verification != OptionVerificationType::kDeprecated)) {
         return Status::InvalidArgument("Can't parse PlainTableOptions:",
                                         o.first + " " + error_message);
@@ -1375,14 +1441,11 @@ ColumnFamilyOptions BuildColumnFamilyOptions(
   cf_opts.write_buffer_size = mutable_cf_options.write_buffer_size;
   cf_opts.max_write_buffer_number = mutable_cf_options.max_write_buffer_number;
   cf_opts.arena_block_size = mutable_cf_options.arena_block_size;
-  cf_opts.memtable_prefix_bloom_bits =
-      mutable_cf_options.memtable_prefix_bloom_bits;
-  cf_opts.memtable_prefix_bloom_probes =
-      mutable_cf_options.memtable_prefix_bloom_probes;
+  cf_opts.memtable_prefix_bloom_size_ratio =
+      mutable_cf_options.memtable_prefix_bloom_size_ratio;
   cf_opts.memtable_prefix_bloom_huge_page_tlb_size =
       mutable_cf_options.memtable_prefix_bloom_huge_page_tlb_size;
   cf_opts.max_successive_merges = mutable_cf_options.max_successive_merges;
-  cf_opts.filter_deletes = mutable_cf_options.filter_deletes;
   cf_opts.inplace_update_num_locks =
       mutable_cf_options.inplace_update_num_locks;
 
@@ -1422,8 +1485,7 @@ ColumnFamilyOptions BuildColumnFamilyOptions(
   cf_opts.max_sequential_skip_in_iterations =
       mutable_cf_options.max_sequential_skip_in_iterations;
   cf_opts.paranoid_file_checks = mutable_cf_options.paranoid_file_checks;
-  cf_opts.compaction_measure_io_stats =
-      mutable_cf_options.compaction_measure_io_stats;
+  cf_opts.report_bg_io_stats = mutable_cf_options.report_bg_io_stats;
 
   cf_opts.table_factory = options.table_factory;
   // TODO(yhchiang): find some way to handle the following derived options

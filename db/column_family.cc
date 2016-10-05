@@ -1,4 +1,4 @@
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -26,7 +26,6 @@
 #include "db/table_properties_collector.h"
 #include "db/version_set.h"
 #include "db/write_controller.h"
-#include "db/writebuffer.h"
 #include "memtable/hash_skiplist_rep.h"
 #include "util/autovector.h"
 #include "util/compression.h"
@@ -66,6 +65,20 @@ uint32_t ColumnFamilyHandleImpl::GetID() const { return cfd()->GetID(); }
 
 const std::string& ColumnFamilyHandleImpl::GetName() const {
   return cfd()->GetName();
+}
+
+Status ColumnFamilyHandleImpl::GetDescriptor(ColumnFamilyDescriptor* desc) {
+#ifndef ROCKSDB_LITE
+  // accessing mutable cf-options requires db mutex.
+  InstrumentedMutexLock l(mutex_);
+  *desc = ColumnFamilyDescriptor(
+      cfd()->GetName(),
+      BuildColumnFamilyOptions(*cfd()->options(),
+                               *cfd()->GetLatestMutableCFOptions()));
+  return Status::OK();
+#else
+  return Status::NotSupported();
+#endif  // !ROCKSDB_LITE
 }
 
 const Comparator* ColumnFamilyHandleImpl::user_comparator() const {
@@ -116,10 +129,9 @@ Status CheckConcurrentWritesSupported(const ColumnFamilyOptions& cf_options) {
         "In-place memtable updates (inplace_update_support) is not compatible "
         "with concurrent writes (allow_concurrent_memtable_write)");
   }
-  if (cf_options.filter_deletes) {
+  if (!cf_options.memtable_factory->IsInsertConcurrentlySupported()) {
     return Status::InvalidArgument(
-        "Delete filtering (filter_deletes) is not compatible with concurrent "
-        "memtable writes (allow_concurrent_memtable_writes)");
+        "Memtable doesn't concurrent writes (allow_concurrent_memtable_write)");
   }
   return Status::OK();
 }
@@ -129,13 +141,10 @@ ColumnFamilyOptions SanitizeOptions(const DBOptions& db_options,
                                     const ColumnFamilyOptions& src) {
   ColumnFamilyOptions result = src;
   result.comparator = icmp;
-#ifdef OS_MACOSX
-  // TODO(icanadi) make write_buffer_size uint64_t instead of size_t
-  ClipToRange(&result.write_buffer_size, ((size_t)64) << 10, ((size_t)1) << 30);
-#else
-  ClipToRange(&result.write_buffer_size,
-              ((size_t)64) << 10, ((size_t)64) << 30);
-#endif
+  size_t clamp_max = std::conditional<
+      sizeof(size_t) == 4, std::integral_constant<size_t, 0xffffffff>,
+      std::integral_constant<uint64_t, 64ull << 30>>::type::value;
+  ClipToRange(&result.write_buffer_size, ((size_t)64) << 10, clamp_max);
   // if user sets arena_block_size, we trust user to use this value. Otherwise,
   // calculate a proper value from writer_buffer_size;
   if (result.arena_block_size <= 0) {
@@ -161,6 +170,12 @@ ColumnFamilyOptions SanitizeOptions(const DBOptions& db_options,
   }
   if (result.max_write_buffer_number_to_maintain < 0) {
     result.max_write_buffer_number_to_maintain = result.max_write_buffer_number;
+  }
+  // bloom filter size shouldn't exceed 1/4 of memtable size.
+  if (result.memtable_prefix_bloom_size_ratio > 0.25) {
+    result.memtable_prefix_bloom_size_ratio = 0.25;
+  } else if (result.memtable_prefix_bloom_size_ratio < 0) {
+    result.memtable_prefix_bloom_size_ratio = 0;
   }
   XFUNC_TEST("memtablelist_history", "transaction_xftest_SanitizeOptions",
              xf_transaction_set_memtable_history1,
@@ -225,6 +240,17 @@ ColumnFamilyOptions SanitizeOptions(const DBOptions& db_options,
          result.level0_slowdown_writes_trigger,
          result.level0_file_num_compaction_trigger);
   }
+
+  if (result.soft_pending_compaction_bytes_limit == 0) {
+    result.soft_pending_compaction_bytes_limit =
+        result.hard_pending_compaction_bytes_limit;
+  } else if (result.hard_pending_compaction_bytes_limit > 0 &&
+             result.soft_pending_compaction_bytes_limit >
+                 result.hard_pending_compaction_bytes_limit) {
+    result.soft_pending_compaction_bytes_limit =
+        result.hard_pending_compaction_bytes_limit;
+  }
+
   if (result.level_compaction_dynamic_level_bytes) {
     if (result.compaction_style != kCompactionStyleLevel ||
         db_options.db_paths.size() > 1U) {
@@ -303,7 +329,7 @@ void SuperVersionUnrefHandle(void* ptr) {
 
 ColumnFamilyData::ColumnFamilyData(
     uint32_t id, const std::string& name, Version* _dummy_versions,
-    Cache* _table_cache, WriteBuffer* write_buffer,
+    Cache* _table_cache, WriteBufferManager* write_buffer_manager,
     const ColumnFamilyOptions& cf_options, const DBOptions* db_options,
     const EnvOptions& env_options, ColumnFamilySet* column_family_set)
     : id_(id),
@@ -317,7 +343,7 @@ ColumnFamilyData::ColumnFamilyData(
                SanitizeOptions(*db_options, &internal_comparator_, cf_options)),
       ioptions_(options_),
       mutable_cf_options_(options_, ioptions_),
-      write_buffer_(write_buffer),
+      write_buffer_manager_(write_buffer_manager),
       mem_(nullptr),
       imm_(options_.min_write_buffer_number_to_merge,
            options_.max_write_buffer_number_to_maintain),
@@ -481,7 +507,8 @@ std::unique_ptr<WriteControllerToken> SetupDelay(
     // because of hitting the max write buffer number.
     if (prev_compaction_neeed_bytes > 0 &&
         prev_compaction_neeed_bytes <= compaction_needed_bytes) {
-      write_rate /= kSlowdownRatio;
+      write_rate = static_cast<uint64_t>(static_cast<double>(write_rate) /
+                                         kSlowdownRatio);
       if (write_rate < kMinWriteRate) {
         write_rate = kMinWriteRate;
       }
@@ -489,13 +516,29 @@ std::unique_ptr<WriteControllerToken> SetupDelay(
       // We are speeding up by ratio of kSlowdownRatio when we have paid
       // compaction debt. But we'll never speed up to faster than the write rate
       // given by users.
-      write_rate *= kSlowdownRatio;
+      write_rate = static_cast<uint64_t>(static_cast<double>(write_rate) *
+                                         kSlowdownRatio);
       if (write_rate > max_write_rate) {
         write_rate = max_write_rate;
       }
     }
   }
   return write_controller->GetDelayToken(write_rate);
+}
+
+int GetL0ThresholdSpeedupCompaction(int level0_file_num_compaction_trigger,
+                                    int level0_slowdown_writes_trigger) {
+  // SanitizeOptions() ensures it.
+  assert(level0_file_num_compaction_trigger <= level0_slowdown_writes_trigger);
+
+  // 1/4 of the way between L0 compaction trigger threshold and slowdown
+  // condition.
+  // Or twice as compaction trigger, if it is smaller.
+  return std::min(level0_file_num_compaction_trigger * 2,
+                  level0_file_num_compaction_trigger +
+                      (level0_slowdown_writes_trigger -
+                       level0_file_num_compaction_trigger) /
+                          4);
 }
 }  // namespace
 
@@ -515,21 +558,6 @@ void ColumnFamilyData::RecalculateWriteStallConditions(
           "(waiting for flush), max_write_buffer_number is set to %d",
           name_.c_str(), imm()->NumNotFlushed(),
           mutable_cf_options.max_write_buffer_number);
-    } else if (mutable_cf_options.max_write_buffer_number > 3 &&
-               imm()->NumNotFlushed() >=
-                   mutable_cf_options.max_write_buffer_number - 1) {
-      write_controller_token_ =
-          SetupDelay(ioptions_.delayed_write_rate, write_controller,
-                     compaction_needed_bytes, prev_compaction_needed_bytes_,
-                     mutable_cf_options.disable_auto_compactions);
-      internal_stats_->AddCFStats(InternalStats::MEMTABLE_SLOWDOWN, 1);
-      Log(InfoLogLevel::WARN_LEVEL, ioptions_.info_log,
-          "[%s] Stalling writes because we have %d immutable memtables "
-          "(waiting for flush), max_write_buffer_number is set to %d "
-          "rate %" PRIu64,
-          name_.c_str(), imm()->NumNotFlushed(),
-          mutable_cf_options.max_write_buffer_number,
-          write_controller->delayed_write_rate());
     } else if (vstorage->l0_delay_trigger_count() >=
                mutable_cf_options.level0_stop_writes_trigger) {
       write_controller_token_ = write_controller->GetStopToken();
@@ -551,6 +579,21 @@ void ColumnFamilyData::RecalculateWriteStallConditions(
           "[%s] Stopping writes because of estimated pending compaction "
           "bytes %" PRIu64,
           name_.c_str(), compaction_needed_bytes);
+    } else if (mutable_cf_options.max_write_buffer_number > 3 &&
+               imm()->NumNotFlushed() >=
+                   mutable_cf_options.max_write_buffer_number - 1) {
+      write_controller_token_ =
+          SetupDelay(ioptions_.delayed_write_rate, write_controller,
+                     compaction_needed_bytes, prev_compaction_needed_bytes_,
+                     mutable_cf_options.disable_auto_compactions);
+      internal_stats_->AddCFStats(InternalStats::MEMTABLE_SLOWDOWN, 1);
+      Log(InfoLogLevel::WARN_LEVEL, ioptions_.info_log,
+          "[%s] Stalling writes because we have %d immutable memtables "
+          "(waiting for flush), max_write_buffer_number is set to %d "
+          "rate %" PRIu64,
+          name_.c_str(), imm()->NumNotFlushed(),
+          mutable_cf_options.max_write_buffer_number,
+          write_controller->delayed_write_rate());
     } else if (mutable_cf_options.level0_slowdown_writes_trigger >= 0 &&
                vstorage->l0_delay_trigger_count() >=
                    mutable_cf_options.level0_slowdown_writes_trigger) {
@@ -582,6 +625,29 @@ void ColumnFamilyData::RecalculateWriteStallConditions(
           "bytes %" PRIu64 " rate %" PRIu64,
           name_.c_str(), vstorage->estimated_compaction_needed_bytes(),
           write_controller->delayed_write_rate());
+    } else if (vstorage->l0_delay_trigger_count() >=
+               GetL0ThresholdSpeedupCompaction(
+                   mutable_cf_options.level0_file_num_compaction_trigger,
+                   mutable_cf_options.level0_slowdown_writes_trigger)) {
+      write_controller_token_ = write_controller->GetCompactionPressureToken();
+      Log(InfoLogLevel::WARN_LEVEL, ioptions_.info_log,
+          "[%s] Increasing compaction threads because we have %d level-0 "
+          "files ",
+          name_.c_str(), vstorage->l0_delay_trigger_count());
+    } else if (vstorage->estimated_compaction_needed_bytes() >=
+               mutable_cf_options.soft_pending_compaction_bytes_limit / 4) {
+      // Increase compaction threads if bytes needed for compaction exceeds
+      // 1/4 of threshold for slowing down.
+      // If soft pending compaction byte limit is not set, always speed up
+      // compaction.
+      write_controller_token_ = write_controller->GetCompactionPressureToken();
+      if (mutable_cf_options.soft_pending_compaction_bytes_limit > 0) {
+        Log(InfoLogLevel::WARN_LEVEL, ioptions_.info_log,
+            "[%s] Increasing compaction threads because of estimated pending "
+            "compaction "
+            "bytes %" PRIu64,
+            name_.c_str(), vstorage->estimated_compaction_needed_bytes());
+      }
     } else {
       write_controller_token_.reset();
     }
@@ -609,7 +675,7 @@ MemTable* ColumnFamilyData::ConstructNewMemtable(
     const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq) {
   assert(current_ != nullptr);
   return new MemTable(internal_comparator_, ioptions_, mutable_cf_options,
-                      write_buffer_, earliest_seq);
+                      write_buffer_manager_, earliest_seq);
 }
 
 void ColumnFamilyData::CreateNewMemtable(
@@ -788,7 +854,7 @@ ColumnFamilySet::ColumnFamilySet(const std::string& dbname,
                                  const DBOptions* db_options,
                                  const EnvOptions& env_options,
                                  Cache* table_cache,
-                                 WriteBuffer* write_buffer,
+                                 WriteBufferManager* write_buffer_manager,
                                  WriteController* write_controller)
     : max_column_family_(0),
       dummy_cfd_(new ColumnFamilyData(0, "", nullptr, nullptr, nullptr,
@@ -799,7 +865,7 @@ ColumnFamilySet::ColumnFamilySet(const std::string& dbname,
       db_options_(db_options),
       env_options_(env_options),
       table_cache_(table_cache),
-      write_buffer_(write_buffer),
+      write_buffer_manager_(write_buffer_manager),
       write_controller_(write_controller) {
   // initialize linked list
   dummy_cfd_->prev_ = dummy_cfd_;
@@ -862,10 +928,9 @@ ColumnFamilyData* ColumnFamilySet::CreateColumnFamily(
     const std::string& name, uint32_t id, Version* dummy_versions,
     const ColumnFamilyOptions& options) {
   assert(column_families_.find(name) == column_families_.end());
-  ColumnFamilyData* new_cfd =
-      new ColumnFamilyData(id, name, dummy_versions, table_cache_,
-                           write_buffer_, options, db_options_,
-                           env_options_, this);
+  ColumnFamilyData* new_cfd = new ColumnFamilyData(
+      id, name, dummy_versions, table_cache_, write_buffer_manager_, options,
+      db_options_, env_options_, this);
   column_families_.insert({name, id});
   column_family_data_.insert({id, new_cfd});
   max_column_family_ = std::max(max_column_family_, id);

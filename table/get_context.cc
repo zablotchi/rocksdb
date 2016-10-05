@@ -1,9 +1,10 @@
-//  Copyright (c) 2014, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
 
 #include "table/get_context.h"
+#include "db/merge_helper.h"
 #include "rocksdb/env.h"
 #include "rocksdb/merge_operator.h"
 #include "rocksdb/statistics.h"
@@ -70,7 +71,9 @@ void GetContext::SaveValue(const Slice& value, SequenceNumber seq) {
   appendToReplayLog(replay_log_, kTypeValue, value);
 
   state_ = kFound;
-  value_->assign(value.data(), value.size());
+  if (value_ != nullptr) {
+    value_->assign(value.data(), value.size());
+  }
 }
 
 bool GetContext::SaveValue(const ParsedInternalKey& parsed_key,
@@ -93,23 +96,20 @@ bool GetContext::SaveValue(const ParsedInternalKey& parsed_key,
         assert(state_ == kNotFound || state_ == kMerge);
         if (kNotFound == state_) {
           state_ = kFound;
-          value_->assign(value.data(), value.size());
+          if (value_ != nullptr) {
+            value_->assign(value.data(), value.size());
+          }
         } else if (kMerge == state_) {
           assert(merge_operator_ != nullptr);
           state_ = kFound;
-          bool merge_success = false;
-          {
-            StopWatchNano timer(env_, statistics_ != nullptr);
-            PERF_TIMER_GUARD(merge_operator_time_nanos);
-            merge_success = merge_operator_->FullMerge(
-                user_key_, &value, merge_context_->GetOperands(), value_,
-                logger_);
-            RecordTick(statistics_, MERGE_OPERATION_TOTAL_TIME,
-                       timer.ElapsedNanosSafe());
-          }
-          if (!merge_success) {
-            RecordTick(statistics_, NUMBER_MERGE_FAILURES);
-            state_ = kCorrupt;
+          if (value_ != nullptr) {
+            Status merge_status =
+                MergeHelper::TimedFullMerge(merge_operator_, user_key_, &value,
+                                            merge_context_->GetOperands(),
+                                            value_, logger_, statistics_, env_);
+            if (!merge_status.ok()) {
+              state_ = kCorrupt;
+            }
           }
         }
         return false;
@@ -123,19 +123,15 @@ bool GetContext::SaveValue(const ParsedInternalKey& parsed_key,
           state_ = kDeleted;
         } else if (kMerge == state_) {
           state_ = kFound;
-          bool merge_success = false;
-          {
-            StopWatchNano timer(env_, statistics_ != nullptr);
-            PERF_TIMER_GUARD(merge_operator_time_nanos);
-            merge_success = merge_operator_->FullMerge(
-                user_key_, nullptr, merge_context_->GetOperands(), value_,
-                logger_);
-            RecordTick(statistics_, MERGE_OPERATION_TOTAL_TIME,
-                       timer.ElapsedNanosSafe());
-          }
-          if (!merge_success) {
-            RecordTick(statistics_, NUMBER_MERGE_FAILURES);
-            state_ = kCorrupt;
+          if (value_ != nullptr) {
+            Status merge_status =
+                MergeHelper::TimedFullMerge(merge_operator_, user_key_, nullptr,
+                                            merge_context_->GetOperands(),
+                                            value_, logger_, statistics_, env_);
+
+            if (!merge_status.ok()) {
+              state_ = kCorrupt;
+            }
           }
         }
         return false;

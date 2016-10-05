@@ -1,4 +1,4 @@
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -10,13 +10,13 @@
 #include <string>
 #include <tuple>
 
-#include "db/compaction_job.h"
 #include "db/column_family.h"
+#include "db/compaction_job.h"
 #include "db/version_set.h"
-#include "db/writebuffer.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/db.h"
 #include "rocksdb/options.h"
+#include "rocksdb/write_buffer_manager.h"
 #include "table/mock_table.h"
 #include "util/file_reader_writer.h"
 #include "util/string_util.h"
@@ -70,9 +70,9 @@ class CompactionJobTest : public testing::Test {
         dbname_(test::TmpDir() + "/compaction_job_test"),
         mutable_cf_options_(Options(), ImmutableCFOptions(Options())),
         table_cache_(NewLRUCache(50000, 16)),
-        write_buffer_(db_options_.db_write_buffer_size),
+        write_buffer_manager_(db_options_.db_write_buffer_size),
         versions_(new VersionSet(dbname_, &db_options_, env_options_,
-                                 table_cache_.get(), &write_buffer_,
+                                 table_cache_.get(), &write_buffer_manager_,
                                  &write_controller_)),
         shutting_down_(false),
         mock_table_factory_(new mock::MockTableFactory()) {
@@ -250,9 +250,9 @@ class CompactionJobTest : public testing::Test {
     EventLogger event_logger(db_options_.info_log.get());
     CompactionJob compaction_job(
         0, &compaction, db_options_, env_options_, versions_.get(),
-        &shutting_down_, &log_buffer, nullptr, nullptr, nullptr, snapshots,
-        earliest_write_conflict_snapshot, table_cache_, &event_logger, false,
-        false, dbname_, &compaction_job_stats_);
+        &shutting_down_, &log_buffer, nullptr, nullptr, nullptr, &mutex_,
+        &bg_error_, snapshots, earliest_write_conflict_snapshot, table_cache_,
+        &event_logger, false, false, dbname_, &compaction_job_stats_);
 
     VerifyInitializationOfCompactionJobStats(compaction_job_stats_);
 
@@ -262,8 +262,7 @@ class CompactionJobTest : public testing::Test {
     s = compaction_job.Run();
     ASSERT_OK(s);
     mutex_.Lock();
-    ASSERT_OK(compaction_job.Install(*cfd->GetLatestMutableCFOptions(),
-                                     &mutex_));
+    ASSERT_OK(compaction_job.Install(*cfd->GetLatestMutableCFOptions()));
     mutex_.Unlock();
 
     if (expected_results.size() == 0) {
@@ -286,7 +285,7 @@ class CompactionJobTest : public testing::Test {
   WriteController write_controller_;
   DBOptions db_options_;
   ColumnFamilyOptions cf_options_;
-  WriteBuffer write_buffer_;
+  WriteBufferManager write_buffer_manager_;
   std::unique_ptr<VersionSet> versions_;
   InstrumentedMutex mutex_;
   std::atomic<bool> shutting_down_;
@@ -295,6 +294,7 @@ class CompactionJobTest : public testing::Test {
   ColumnFamilyData* cfd_;
   std::unique_ptr<CompactionFilter> compaction_filter_;
   std::shared_ptr<MergeOperator> merge_op_;
+  Status bg_error_;
 };
 
 TEST_F(CompactionJobTest, Simple) {

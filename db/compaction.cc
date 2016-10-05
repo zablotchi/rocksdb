@@ -1,4 +1,4 @@
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -16,8 +16,8 @@
 #include <inttypes.h>
 #include <vector>
 
-#include "rocksdb/compaction_filter.h"
 #include "db/column_family.h"
+#include "rocksdb/compaction_filter.h"
 #include "util/logging.h"
 #include "util/sync_point.h"
 
@@ -162,9 +162,6 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
       deletion_compaction_(_deletion_compaction),
       inputs_(std::move(_inputs)),
       grandparents_(std::move(_grandparents)),
-      grandparent_index_(0),
-      seen_key_(false),
-      overlapped_bytes_(0),
       score_(_score),
       bottommost_level_(IsBottommostLevel(output_level_, vstorage, inputs_)),
       is_full_compaction_(IsFullCompaction(vstorage, inputs_)),
@@ -190,8 +187,7 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
     }
   }
 
-  Slice smallest_user_key;
-  GetBoundaryKeys(vstorage, inputs_, &smallest_user_key, &largest_user_key_);
+  GetBoundaryKeys(vstorage, inputs_, &smallest_user_key_, &largest_user_key_);
 }
 
 Compaction::~Compaction() {
@@ -206,9 +202,11 @@ Compaction::~Compaction() {
 }
 
 bool Compaction::InputCompressionMatchesOutput() const {
-  int base_level = input_version_->storage_info()->base_level();
-  bool matches = (GetCompressionType(*cfd_->ioptions(), start_level_,
-                                     base_level) == output_compression_);
+  VersionStorageInfo* vstorage = input_version_->storage_info();
+  int base_level = vstorage->base_level();
+  bool matches =
+      (GetCompressionType(*cfd_->ioptions(), vstorage, mutable_cf_options_,
+                          start_level_, base_level) == output_compression_);
   if (matches) {
     TEST_SYNC_POINT("Compaction::InputCompressionMatchesOutput:Matches");
     return true;
@@ -290,38 +288,12 @@ bool Compaction::KeyNotExistsBeyondOutputLevel(
   return true;
 }
 
-bool Compaction::ShouldStopBefore(const Slice& internal_key) {
-  // Scan to find earliest grandparent file that contains key.
-  const InternalKeyComparator* icmp = &cfd_->internal_comparator();
-  while (grandparent_index_ < grandparents_.size() &&
-      icmp->Compare(internal_key,
-                    grandparents_[grandparent_index_]->largest.Encode()) > 0) {
-    if (seen_key_) {
-      overlapped_bytes_ += grandparents_[grandparent_index_]->fd.GetFileSize();
-    }
-    assert(grandparent_index_ + 1 >= grandparents_.size() ||
-           icmp->Compare(grandparents_[grandparent_index_]->largest.Encode(),
-                         grandparents_[grandparent_index_+1]->smallest.Encode())
-                         < 0);
-    grandparent_index_++;
-  }
-  seen_key_ = true;
-
-  if (overlapped_bytes_ > max_grandparent_overlap_bytes_) {
-    // Too much overlap for current output; start new output
-    overlapped_bytes_ = 0;
-    return true;
-  } else {
-    return false;
-  }
-}
-
 // Mark (or clear) each file that is being compacted
 void Compaction::MarkFilesBeingCompacted(bool mark_as_compacted) {
   for (size_t i = 0; i < num_input_levels(); i++) {
     for (size_t j = 0; j < inputs_[i].size(); j++) {
-      assert(mark_as_compacted ? !inputs_[i][j]->being_compacted :
-                                  inputs_[i][j]->being_compacted);
+      assert(mark_as_compacted ? !inputs_[i][j]->being_compacted
+                               : inputs_[i][j]->being_compacted);
       inputs_[i][j]->being_compacted = mark_as_compacted;
     }
   }
@@ -396,10 +368,8 @@ int InputSummary(const std::vector<FileMetaData*>& files, char* output,
 
 void Compaction::Summary(char* output, int len) {
   int write =
-      snprintf(output, len, "Base version %" PRIu64
-                            " Base level %d, inputs: [",
-               input_version_->GetVersionNumber(),
-               start_level_);
+      snprintf(output, len, "Base version %" PRIu64 " Base level %d, inputs: [",
+               input_version_->GetVersionNumber(), start_level_);
   if (write < 0 || write >= len) {
     return;
   }
@@ -421,7 +391,7 @@ void Compaction::Summary(char* output, int len) {
   snprintf(output + write, len - write, "]");
 }
 
-uint64_t Compaction::OutputFilePreallocationSize() {
+uint64_t Compaction::OutputFilePreallocationSize() const {
   uint64_t preallocation_size = 0;
 
   if (cfd_->ioptions()->compaction_style == kCompactionStyleLevel ||

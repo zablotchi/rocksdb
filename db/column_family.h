@@ -1,4 +1,4 @@
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -59,6 +59,7 @@ class ColumnFamilyHandleImpl : public ColumnFamilyHandle {
 
   virtual uint32_t GetID() const override;
   virtual const std::string& GetName() const override;
+  virtual Status GetDescriptor(ColumnFamilyDescriptor* desc) override;
 
  private:
   ColumnFamilyData* cfd_;
@@ -208,7 +209,7 @@ class ColumnFamilyData {
   const ImmutableCFOptions* ioptions() const { return &ioptions_; }
   // REQUIRES: DB mutex held
   // This returns the MutableCFOptions used by current SuperVersion
-  // You shoul use this API to reference MutableCFOptions most of the time.
+  // You should use this API to reference MutableCFOptions most of the time.
   const MutableCFOptions* GetCurrentMutableCFOptions() const {
     return &(super_version_->mutable_cf_options);
   }
@@ -229,7 +230,7 @@ class ColumnFamilyData {
   MemTable* mem() { return mem_; }
   Version* current() { return current_; }
   Version* dummy_versions() { return dummy_versions_; }
-  void SetCurrent(Version* current);
+  void SetCurrent(Version* _current);
   uint64_t GetNumLiveVersions() const;  // REQUIRE: DB mutex held
   uint64_t GetTotalSstFilesSize() const;  // REQUIRE: DB mutex held
   void SetMemtable(MemTable* new_mem) { mem_ = new_mem; }
@@ -322,7 +323,7 @@ class ColumnFamilyData {
   friend class ColumnFamilySet;
   ColumnFamilyData(uint32_t id, const std::string& name,
                    Version* dummy_versions, Cache* table_cache,
-                   WriteBuffer* write_buffer,
+                   WriteBufferManager* write_buffer_manager,
                    const ColumnFamilyOptions& options,
                    const DBOptions* db_options, const EnvOptions& env_options,
                    ColumnFamilySet* column_family_set);
@@ -347,7 +348,7 @@ class ColumnFamilyData {
 
   std::unique_ptr<InternalStats> internal_stats_;
 
-  WriteBuffer* write_buffer_;
+  WriteBufferManager* write_buffer_manager_;
 
   MemTable* mem_;
   MemTableList imm_;
@@ -437,7 +438,8 @@ class ColumnFamilySet {
 
   ColumnFamilySet(const std::string& dbname, const DBOptions* db_options,
                   const EnvOptions& env_options, Cache* table_cache,
-                  WriteBuffer* write_buffer, WriteController* write_controller);
+                  WriteBufferManager* write_buffer_manager,
+                  WriteController* write_controller);
   ~ColumnFamilySet();
 
   ColumnFamilyData* GetDefault() const;
@@ -463,6 +465,8 @@ class ColumnFamilySet {
   // REQUIRES: DB mutex held
   // Don't call while iterating over ColumnFamilySet
   void FreeDeadColumnFamilies();
+
+  Cache* get_table_cache() { return table_cache_; }
 
  private:
   friend class ColumnFamilyData;
@@ -492,7 +496,7 @@ class ColumnFamilySet {
   const DBOptions* const db_options_;
   const EnvOptions env_options_;
   Cache* table_cache_;
-  WriteBuffer* write_buffer_;
+  WriteBufferManager* write_buffer_manager_;
   WriteController* write_controller_;
 };
 
@@ -531,7 +535,7 @@ class ColumnFamilyMemTablesImpl : public ColumnFamilyMemTables {
   // Cannot be called while another thread is calling Seek().
   // REQUIRES: use this function of DBImpl::column_family_memtables_ should be
   //           under a DB mutex OR from a write thread
-  virtual ColumnFamilyData* current() { return current_; }
+  virtual ColumnFamilyData* current() override { return current_; }
 
  private:
   ColumnFamilySet* column_family_set_;

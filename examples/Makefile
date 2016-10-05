@@ -5,6 +5,14 @@ CXXFLAGS += -I.. -I../include -I../db/atomic_ops -I../db/ascylib_aux -I../db/asc
 
 include Makefile.common.ascylib
 
+ifndef DISABLE_JEMALLOC
+	ifdef JEMALLOC
+		PLATFORM_CXXFLAGS += "-DROCKSDB_JEMALLOC"
+	endif
+	EXEC_LDFLAGS := $(JEMALLOC_LIB) $(EXEC_LDFLAGS) -lpthread
+	PLATFORM_CXXFLAGS += $(JEMALLOC_INCLUDE)
+endif
+	
 .PHONY: clean librocksdb
 
 all: simple_example column_families_example compact_files_example c_simple_example optimistic_transaction_example transaction_example

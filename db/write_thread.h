@@ -1,4 +1,4 @@
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -11,10 +11,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
-#include <vector>
 #include <type_traits>
-#include "db/write_batch_internal.h"
+#include <vector>
+
+#include "db/write_callback.h"
 #include "rocksdb/status.h"
+#include "rocksdb/types.h"
+#include "rocksdb/write_batch.h"
 #include "util/autovector.h"
 #include "util/instrumented_mutex.h"
 
@@ -65,6 +68,7 @@ class WriteThread {
   struct ParallelGroup {
     Writer* leader;
     Writer* last_writer;
+    SequenceNumber last_sequence;
     bool early_exit_allowed;
     // before running goes to zero, status needs leader->StateMutex()
     Status status;
@@ -76,13 +80,17 @@ class WriteThread {
     WriteBatch* batch;
     bool sync;
     bool disableWAL;
+    bool disable_memtable;
+    uint64_t log_used;  // log number that this batch was inserted into
+    uint64_t log_ref;   // log number that memtable insert should reference
     bool in_batch_group;
-    bool has_callback;
+    WriteCallback* callback;
     bool made_waitable;          // records lazy construction of mutex and cv
     std::atomic<uint8_t> state;  // write under StateMutex() or pre-link
     ParallelGroup* parallel_group;
     SequenceNumber sequence;  // the sequence number to use
-    Status status;
+    Status status;            // status of memtable inserter
+    Status callback_status;   // status returned by callback->Callback()
     std::aligned_storage<sizeof(std::mutex)>::type state_mutex_bytes;
     std::aligned_storage<sizeof(std::condition_variable)>::type state_cv_bytes;
     Writer* link_older;  // read/write only before linking, or as leader
@@ -92,10 +100,14 @@ class WriteThread {
         : batch(nullptr),
           sync(false),
           disableWAL(false),
+          disable_memtable(false),
+          log_used(0),
+          log_ref(0),
           in_batch_group(false),
-          has_callback(false),
+          callback(nullptr),
           made_waitable(false),
           state(STATE_INIT),
+          parallel_group(nullptr),
           link_older(nullptr),
           link_newer(nullptr) {}
 
@@ -104,6 +116,13 @@ class WriteThread {
         StateMutex().~mutex();
         StateCV().~condition_variable();
       }
+    }
+
+    bool CheckCallback(DB* db) {
+      if (callback != nullptr) {
+        callback_status = callback->Callback(db);
+      }
+      return callback_status.ok();
     }
 
     void CreateMutex() {
@@ -116,6 +135,36 @@ class WriteThread {
         new (&state_cv_bytes) std::condition_variable;
       }
     }
+
+    // returns the aggregate status of this Writer
+    Status FinalStatus() {
+      if (!status.ok()) {
+        // a non-ok memtable write status takes presidence
+        assert(callback == nullptr || callback_status.ok());
+        return status;
+      } else if (!callback_status.ok()) {
+        // if the callback failed then that is the status we want
+        // because a memtable insert should not have been attempted
+        assert(callback != nullptr);
+        assert(status.ok());
+        return callback_status;
+      } else {
+        // if there is no callback then we only care about
+        // the memtable insert status
+        assert(callback == nullptr || callback_status.ok());
+        return status;
+      }
+    }
+
+    bool CallbackFailed() {
+      return (callback != nullptr) && !callback_status.ok();
+    }
+
+    bool ShouldWriteToMemtable() {
+      return !CallbackFailed() && !disable_memtable;
+    }
+
+    bool ShouldWriteToWAL() { return !CallbackFailed() && !disableWAL; }
 
     // No other mutexes may be acquired while holding StateMutex(), it is
     // always last in the order
@@ -144,7 +193,7 @@ class WriteThread {
   // writer.  If w has become the leader of a write batch group, returns
   // STATE_GROUP_LEADER.  If w has been made part of a sequential batch
   // group and the leader has performed the write, returns STATE_DONE.
-  // If w has been made part of a parallel batch group and is reponsible
+  // If w has been made part of a parallel batch group and is responsible
   // for updating the memtable, returns STATE_PARALLEL_FOLLOWER.
   //
   // The db mutex SHOULD NOT be held when calling this function, because
@@ -160,8 +209,9 @@ class WriteThread {
   // Writer** last_writer:   Out-param that identifies the last follower
   // autovector<WriteBatch*>* write_batch_group: Out-param of group members
   // returns:                Total batch group byte size
-  size_t EnterAsBatchGroupLeader(Writer* leader, Writer** last_writer,
-                                 autovector<WriteBatch*>* write_batch_group);
+  size_t EnterAsBatchGroupLeader(
+      Writer* leader, Writer** last_writer,
+      autovector<WriteThread::Writer*>* write_batch_group);
 
   // Causes JoinBatchGroup to return STATE_PARALLEL_FOLLOWER for all of the
   // non-leader members of this write batch group.  Sets Writer::sequence
@@ -207,6 +257,8 @@ class WriteThread {
   struct AdaptationContext {
     const char* name;
     std::atomic<int32_t> value;
+
+    explicit AdaptationContext(const char* name0) : name(name0), value(0) {}
   };
 
  private:

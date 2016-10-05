@@ -1,4 +1,4 @@
-// Copyright (c) 2014, Facebook, Inc.  All rights reserved.
+// Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree. An additional grant
 // of patent rights can be found in the PATENTS file in the same directory.
@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <jni.h>
-#include <strings.h>
 #include <memory>
 
 #include "include/org_rocksdb_Options.h"
@@ -37,25 +36,25 @@
 /*
  * Class:     org_rocksdb_Options
  * Method:    newOptions
- * Signature: ()V
+ * Signature: ()J
  */
-void Java_org_rocksdb_Options_newOptions__(JNIEnv* env, jobject jobj) {
+jlong Java_org_rocksdb_Options_newOptions__(JNIEnv* env, jclass jcls) {
   rocksdb::Options* op = new rocksdb::Options();
-  rocksdb::OptionsJni::setHandle(env, jobj, op);
+  return reinterpret_cast<jlong>(op);
 }
 
 /*
  * Class:     org_rocksdb_Options
  * Method:    newOptions
- * Signature: (JJ)V
+ * Signature: (JJ)J
  */
-void Java_org_rocksdb_Options_newOptions__JJ(JNIEnv* env, jobject jobj,
+jlong Java_org_rocksdb_Options_newOptions__JJ(JNIEnv* env, jclass jcls,
     jlong jdboptions, jlong jcfoptions) {
-  auto dbOpt = reinterpret_cast<const rocksdb::DBOptions*>(jdboptions);
-  auto cfOpt = reinterpret_cast<const rocksdb::ColumnFamilyOptions*>(
+  auto* dbOpt = reinterpret_cast<const rocksdb::DBOptions*>(jdboptions);
+  auto* cfOpt = reinterpret_cast<const rocksdb::ColumnFamilyOptions*>(
       jcfoptions);
   rocksdb::Options* op = new rocksdb::Options(*dbOpt, *cfOpt);
-  rocksdb::OptionsJni::setHandle(env, jobj, op);
+  return reinterpret_cast<jlong>(op);
 }
 
 /*
@@ -1082,21 +1081,20 @@ jbyte Java_org_rocksdb_Options_compressionType(
  * vector.
  */
 std::vector<rocksdb::CompressionType> rocksdb_compression_vector_helper(
-    JNIEnv* env, jobject jcompressionLevels) {
+    JNIEnv* env, jbyteArray jcompressionLevels) {
   std::vector<rocksdb::CompressionType> compressionLevels;
-  // iterate over compressionLevels
-  jobject iteratorObj = env->CallObjectMethod(
-        jcompressionLevels, rocksdb::ListJni::getIteratorMethod(env));
-  while (env->CallBooleanMethod(
-    iteratorObj, rocksdb::ListJni::getHasNextMethod(env)) == JNI_TRUE) {
-    // get compression
-    jobject jcompression_obj = env->CallObjectMethod(iteratorObj,
-        rocksdb::ListJni::getNextMethod(env));
-    jbyte jcompression = env->CallByteMethod(jcompression_obj,
-        rocksdb::ByteJni::getByteValueMethod(env));
-    compressionLevels.push_back(static_cast<rocksdb::CompressionType>(
-        jcompression));
+
+  jsize len = env->GetArrayLength(jcompressionLevels);
+  jbyte* jcompressionLevel = env->GetByteArrayElements(jcompressionLevels,
+    NULL);
+  for(int i = 0; i < len; i++) {
+    jbyte jcl;
+    jcl = jcompressionLevel[i];
+    compressionLevels.push_back(static_cast<rocksdb::CompressionType>(jcl));
   }
+  env->ReleaseByteArrayElements(jcompressionLevels, jcompressionLevel,
+      JNI_ABORT);
+
   return compressionLevels;
 }
 
@@ -1104,34 +1102,29 @@ std::vector<rocksdb::CompressionType> rocksdb_compression_vector_helper(
  * Helper method to convert a CompressionType vector to a Java
  * List.
  */
-jobject rocksdb_compression_list_helper(JNIEnv* env,
+jbyteArray rocksdb_compression_list_helper(JNIEnv* env,
     std::vector<rocksdb::CompressionType> compressionLevels) {
-  jclass jListClazz = env->FindClass("java/util/ArrayList");
-  jmethodID midList = rocksdb::ListJni::getArrayListConstructorMethodId(
-      env, jListClazz);
-  jobject jcompressionLevels = env->NewObject(jListClazz,
-    midList, compressionLevels.size());
-  // insert in java list
+  jbyte jbuf[compressionLevels.size()];
   for (std::vector<rocksdb::CompressionType>::size_type i = 0;
         i != compressionLevels.size(); i++) {
-    jclass jByteClazz = env->FindClass("java/lang/Byte");
-    jmethodID midByte = env->GetMethodID(jByteClazz, "<init>", "(B)V");
-    jobject obj = env->NewObject(jByteClazz, midByte,
-        compressionLevels[i]);
-    env->CallBooleanMethod(jcompressionLevels,
-        rocksdb::ListJni::getListAddMethodId(env), obj);
+      jbuf[i] = compressionLevels[i];
   }
+  // insert in java array
+  jbyteArray jcompressionLevels = env->NewByteArray(
+      static_cast<jsize>(compressionLevels.size()));
+  env->SetByteArrayRegion(jcompressionLevels, 0,
+      static_cast<jsize>(compressionLevels.size()), jbuf);
   return jcompressionLevels;
 }
 
 /*
  * Class:     org_rocksdb_Options
  * Method:    setCompressionPerLevel
- * Signature: (JLjava/util/List;)V
+ * Signature: (J[B)V
  */
 void Java_org_rocksdb_Options_setCompressionPerLevel(
     JNIEnv* env, jobject jobj, jlong jhandle,
-    jobject jcompressionLevels) {
+    jbyteArray jcompressionLevels) {
   auto* options = reinterpret_cast<rocksdb::Options*>(jhandle);
   std::vector<rocksdb::CompressionType> compressionLevels =
       rocksdb_compression_vector_helper(env, jcompressionLevels);
@@ -1141,9 +1134,9 @@ void Java_org_rocksdb_Options_setCompressionPerLevel(
 /*
  * Class:     org_rocksdb_Options
  * Method:    compressionPerLevel
- * Signature: (J)Ljava/util/List;
+ * Signature: (J)[B
  */
-jobject Java_org_rocksdb_Options_compressionPerLevel(
+jbyteArray Java_org_rocksdb_Options_compressionPerLevel(
     JNIEnv* env, jobject jobj, jlong jhandle) {
   auto* options = reinterpret_cast<rocksdb::Options*>(jhandle);
   return rocksdb_compression_list_helper(env,
@@ -1180,7 +1173,7 @@ jbyte Java_org_rocksdb_Options_compactionStyle(
 void Java_org_rocksdb_Options_setMaxTableFilesSizeFIFO(
     JNIEnv* env, jobject jobj, jlong jhandle, jlong jmax_table_files_size) {
   reinterpret_cast<rocksdb::Options*>(jhandle)->compaction_options_fifo.max_table_files_size =
-    static_cast<long>(jmax_table_files_size);
+    static_cast<uint64_t>(jmax_table_files_size);
 }
 
 /*
@@ -1641,27 +1634,6 @@ void Java_org_rocksdb_Options_setVerifyChecksumsInCompaction(
 
 /*
  * Class:     org_rocksdb_Options
- * Method:    filterDeletes
- * Signature: (J)Z
- */
-jboolean Java_org_rocksdb_Options_filterDeletes(
-    JNIEnv* env, jobject jobj, jlong jhandle) {
-  return reinterpret_cast<rocksdb::Options*>(jhandle)->filter_deletes;
-}
-
-/*
- * Class:     org_rocksdb_Options
- * Method:    setFilterDeletes
- * Signature: (JZ)V
- */
-void Java_org_rocksdb_Options_setFilterDeletes(
-    JNIEnv* env, jobject jobj, jlong jhandle, jboolean jfilter_deletes) {
-  reinterpret_cast<rocksdb::Options*>(jhandle)->filter_deletes =
-      static_cast<bool>(jfilter_deletes);
-}
-
-/*
- * Class:     org_rocksdb_Options
  * Method:    maxSequentialSkipInIterations
  * Signature: (J)J
  */
@@ -1739,50 +1711,27 @@ void Java_org_rocksdb_Options_setInplaceUpdateNumLocks(
 
 /*
  * Class:     org_rocksdb_Options
- * Method:    memtablePrefixBloomBits
+ * Method:    memtablePrefixBloomSizeRatio
  * Signature: (J)I
  */
-jint Java_org_rocksdb_Options_memtablePrefixBloomBits(
-    JNIEnv* env, jobject jobj, jlong jhandle) {
-  return reinterpret_cast<rocksdb::Options*>(
-      jhandle)->memtable_prefix_bloom_bits;
+jdouble Java_org_rocksdb_Options_memtablePrefixBloomSizeRatio(JNIEnv* env,
+                                                              jobject jobj,
+                                                              jlong jhandle) {
+  return reinterpret_cast<rocksdb::Options*>(jhandle)
+      ->memtable_prefix_bloom_size_ratio;
 }
 
 /*
  * Class:     org_rocksdb_Options
- * Method:    setMemtablePrefixBloomBits
+ * Method:    setMemtablePrefixBloomSizeRatio
  * Signature: (JI)V
  */
-void Java_org_rocksdb_Options_setMemtablePrefixBloomBits(
+void Java_org_rocksdb_Options_setMemtablePrefixBloomSizeRatio(
     JNIEnv* env, jobject jobj, jlong jhandle,
-    jint jmemtable_prefix_bloom_bits) {
-  reinterpret_cast<rocksdb::Options*>(
-      jhandle)->memtable_prefix_bloom_bits =
-          static_cast<int32_t>(jmemtable_prefix_bloom_bits);
-}
-
-/*
- * Class:     org_rocksdb_Options
- * Method:    memtablePrefixBloomProbes
- * Signature: (J)I
- */
-jint Java_org_rocksdb_Options_memtablePrefixBloomProbes(
-    JNIEnv* env, jobject jobj, jlong jhandle) {
-  return reinterpret_cast<rocksdb::Options*>(
-      jhandle)->memtable_prefix_bloom_probes;
-}
-
-/*
- * Class:     org_rocksdb_Options
- * Method:    setMemtablePrefixBloomProbes
- * Signature: (JI)V
- */
-void Java_org_rocksdb_Options_setMemtablePrefixBloomProbes(
-    JNIEnv* env, jobject jobj, jlong jhandle,
-    jint jmemtable_prefix_bloom_probes) {
-  reinterpret_cast<rocksdb::Options*>(
-      jhandle)->memtable_prefix_bloom_probes =
-          static_cast<int32_t>(jmemtable_prefix_bloom_probes);
+    jdouble jmemtable_prefix_bloom_size_ratio) {
+  reinterpret_cast<rocksdb::Options*>(jhandle)
+      ->memtable_prefix_bloom_size_ratio =
+      static_cast<double>(jmemtable_prefix_bloom_size_ratio);
 }
 
 /*
@@ -1933,12 +1882,12 @@ void Java_org_rocksdb_Options_prepareForBulkLoad(
 /*
  * Class:     org_rocksdb_ColumnFamilyOptions
  * Method:    newColumnFamilyOptions
- * Signature: ()V
+ * Signature: ()J
  */
-void Java_org_rocksdb_ColumnFamilyOptions_newColumnFamilyOptions(
-    JNIEnv* env, jobject jobj) {
+jlong Java_org_rocksdb_ColumnFamilyOptions_newColumnFamilyOptions(
+    JNIEnv* env, jclass jcls) {
   rocksdb::ColumnFamilyOptions* op = new rocksdb::ColumnFamilyOptions();
-  rocksdb::ColumnFamilyOptionsJni::setHandle(env, jobj, op);
+  return reinterpret_cast<jlong>(op);
 }
 
 /*
@@ -2073,7 +2022,7 @@ void Java_org_rocksdb_ColumnFamilyOptions_setMergeOperator(
  * Method:    setCompactionFilterHandle
  * Signature: (JJ)V
  */
-void Java_org_rocksdb_ColumnFamilyOptions_setCompactionFilterHandle__JJ(
+void Java_org_rocksdb_ColumnFamilyOptions_setCompactionFilterHandle(
     JNIEnv* env, jobject jobj, jlong jopt_handle,
     jlong jcompactionfilter_handle) {
   reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jopt_handle)->
@@ -2286,11 +2235,11 @@ jbyte Java_org_rocksdb_ColumnFamilyOptions_compressionType(
 /*
  * Class:     org_rocksdb_ColumnFamilyOptions
  * Method:    setCompressionPerLevel
- * Signature: (JLjava/util/List;)V
+ * Signature: (J[B)V
  */
 void Java_org_rocksdb_ColumnFamilyOptions_setCompressionPerLevel(
     JNIEnv* env, jobject jobj, jlong jhandle,
-    jobject jcompressionLevels) {
+    jbyteArray jcompressionLevels) {
   auto* options = reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jhandle);
   std::vector<rocksdb::CompressionType> compressionLevels =
       rocksdb_compression_vector_helper(env, jcompressionLevels);
@@ -2300,9 +2249,9 @@ void Java_org_rocksdb_ColumnFamilyOptions_setCompressionPerLevel(
 /*
  * Class:     org_rocksdb_ColumnFamilyOptions
  * Method:    compressionPerLevel
- * Signature: (J)Ljava/util/List;
+ * Signature: (J)[B
  */
-jobject Java_org_rocksdb_ColumnFamilyOptions_compressionPerLevel(
+jbyteArray Java_org_rocksdb_ColumnFamilyOptions_compressionPerLevel(
     JNIEnv* env, jobject jobj, jlong jhandle) {
   auto* options = reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jhandle);
   return rocksdb_compression_list_helper(env,
@@ -2339,7 +2288,7 @@ jbyte Java_org_rocksdb_ColumnFamilyOptions_compactionStyle(
 void Java_org_rocksdb_ColumnFamilyOptions_setMaxTableFilesSizeFIFO(
     JNIEnv* env, jobject jobj, jlong jhandle, jlong jmax_table_files_size) {
   reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jhandle)->compaction_options_fifo.max_table_files_size =
-    static_cast<long>(jmax_table_files_size);
+    static_cast<uint64_t>(jmax_table_files_size);
 }
 
 /*
@@ -2823,28 +2772,6 @@ void Java_org_rocksdb_ColumnFamilyOptions_setVerifyChecksumsInCompaction(
 
 /*
  * Class:     org_rocksdb_ColumnFamilyOptions
- * Method:    filterDeletes
- * Signature: (J)Z
- */
-jboolean Java_org_rocksdb_ColumnFamilyOptions_filterDeletes(
-    JNIEnv* env, jobject jobj, jlong jhandle) {
-  return reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jhandle)->
-      filter_deletes;
-}
-
-/*
- * Class:     org_rocksdb_ColumnFamilyOptions
- * Method:    setFilterDeletes
- * Signature: (JZ)V
- */
-void Java_org_rocksdb_ColumnFamilyOptions_setFilterDeletes(
-    JNIEnv* env, jobject jobj, jlong jhandle, jboolean jfilter_deletes) {
-  reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jhandle)->filter_deletes =
-      static_cast<bool>(jfilter_deletes);
-}
-
-/*
- * Class:     org_rocksdb_ColumnFamilyOptions
  * Method:    maxSequentialSkipInIterations
  * Signature: (J)J
  */
@@ -2922,50 +2849,26 @@ void Java_org_rocksdb_ColumnFamilyOptions_setInplaceUpdateNumLocks(
 
 /*
  * Class:     org_rocksdb_ColumnFamilyOptions
- * Method:    memtablePrefixBloomBits
+ * Method:    memtablePrefixBloomSizeRatio
  * Signature: (J)I
  */
-jint Java_org_rocksdb_ColumnFamilyOptions_memtablePrefixBloomBits(
+jdouble Java_org_rocksdb_ColumnFamilyOptions_memtablePrefixBloomSizeRatio(
     JNIEnv* env, jobject jobj, jlong jhandle) {
-  return reinterpret_cast<rocksdb::ColumnFamilyOptions*>(
-      jhandle)->memtable_prefix_bloom_bits;
+  return reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jhandle)
+      ->memtable_prefix_bloom_size_ratio;
 }
 
 /*
  * Class:     org_rocksdb_ColumnFamilyOptions
- * Method:    setMemtablePrefixBloomBits
+ * Method:    setMemtablePrefixBloomSizeRatio
  * Signature: (JI)V
  */
-void Java_org_rocksdb_ColumnFamilyOptions_setMemtablePrefixBloomBits(
+void Java_org_rocksdb_ColumnFamilyOptions_setMemtablePrefixBloomSizeRatio(
     JNIEnv* env, jobject jobj, jlong jhandle,
-    jint jmemtable_prefix_bloom_bits) {
-  reinterpret_cast<rocksdb::ColumnFamilyOptions*>(
-      jhandle)->memtable_prefix_bloom_bits =
-          static_cast<int32_t>(jmemtable_prefix_bloom_bits);
-}
-
-/*
- * Class:     org_rocksdb_ColumnFamilyOptions
- * Method:    memtablePrefixBloomProbes
- * Signature: (J)I
- */
-jint Java_org_rocksdb_ColumnFamilyOptions_memtablePrefixBloomProbes(
-    JNIEnv* env, jobject jobj, jlong jhandle) {
-  return reinterpret_cast<rocksdb::ColumnFamilyOptions*>(
-      jhandle)->memtable_prefix_bloom_probes;
-}
-
-/*
- * Class:     org_rocksdb_ColumnFamilyOptions
- * Method:    setMemtablePrefixBloomProbes
- * Signature: (JI)V
- */
-void Java_org_rocksdb_ColumnFamilyOptions_setMemtablePrefixBloomProbes(
-    JNIEnv* env, jobject jobj, jlong jhandle,
-    jint jmemtable_prefix_bloom_probes) {
-  reinterpret_cast<rocksdb::ColumnFamilyOptions*>(
-      jhandle)->memtable_prefix_bloom_probes =
-          static_cast<int32_t>(jmemtable_prefix_bloom_probes);
+    jdouble jmemtable_prefix_bloom_size_ratio) {
+  reinterpret_cast<rocksdb::ColumnFamilyOptions*>(jhandle)
+      ->memtable_prefix_bloom_size_ratio =
+      static_cast<double>(jmemtable_prefix_bloom_size_ratio);
 }
 
 /*
@@ -3073,12 +2976,12 @@ void Java_org_rocksdb_ColumnFamilyOptions_setOptimizeFiltersForHits(
 /*
  * Class:     org_rocksdb_DBOptions
  * Method:    newDBOptions
- * Signature: ()V
+ * Signature: ()J
  */
-void Java_org_rocksdb_DBOptions_newDBOptions(JNIEnv* env,
-    jobject jobj) {
+jlong Java_org_rocksdb_DBOptions_newDBOptions(JNIEnv* env,
+    jclass jcls) {
   rocksdb::DBOptions* dbop = new rocksdb::DBOptions();
-  rocksdb::DBOptionsJni::setHandle(env, jobj, dbop);
+  return reinterpret_cast<jlong>(dbop);
 }
 
 /*
@@ -3873,12 +3776,12 @@ jlong Java_org_rocksdb_DBOptions_bytesPerSync(
 /*
  * Class:     org_rocksdb_WriteOptions
  * Method:    newWriteOptions
- * Signature: ()V
+ * Signature: ()J
  */
-void Java_org_rocksdb_WriteOptions_newWriteOptions(
-    JNIEnv* env, jobject jwrite_options) {
+jlong Java_org_rocksdb_WriteOptions_newWriteOptions(
+    JNIEnv* env, jclass jcls) {
   rocksdb::WriteOptions* op = new rocksdb::WriteOptions();
-  rocksdb::WriteOptionsJni::setHandle(env, jwrite_options, op);
+  return reinterpret_cast<jlong>(op);
 }
 
 /*
@@ -3890,8 +3793,6 @@ void Java_org_rocksdb_WriteOptions_disposeInternal(
     JNIEnv* env, jobject jwrite_options, jlong jhandle) {
   auto write_options = reinterpret_cast<rocksdb::WriteOptions*>(jhandle);
   delete write_options;
-
-  rocksdb::WriteOptionsJni::setHandle(env, jwrite_options, nullptr);
 }
 
 /*
@@ -3940,12 +3841,12 @@ jboolean Java_org_rocksdb_WriteOptions_disableWAL(
 /*
  * Class:     org_rocksdb_ReadOptions
  * Method:    newReadOptions
- * Signature: ()V
+ * Signature: ()J
  */
-void Java_org_rocksdb_ReadOptions_newReadOptions(
-    JNIEnv* env, jobject jobj) {
+jlong Java_org_rocksdb_ReadOptions_newReadOptions(
+    JNIEnv* env, jclass jcls) {
   auto read_opt = new rocksdb::ReadOptions();
-  rocksdb::ReadOptionsJni::setHandle(env, jobj, read_opt);
+  return reinterpret_cast<jlong>(read_opt);
 }
 
 /*
@@ -3956,7 +3857,6 @@ void Java_org_rocksdb_ReadOptions_newReadOptions(
 void Java_org_rocksdb_ReadOptions_disposeInternal(
     JNIEnv* env, jobject jobj, jlong jhandle) {
   delete reinterpret_cast<rocksdb::ReadOptions*>(jhandle);
-  rocksdb::ReadOptionsJni::setHandle(env, jobj, nullptr);
 }
 
 /*
@@ -4053,12 +3953,12 @@ jlong Java_org_rocksdb_ReadOptions_snapshot(
 /*
  * Class:     org_rocksdb_ComparatorOptions
  * Method:    newComparatorOptions
- * Signature: ()V
+ * Signature: ()J
  */
-void Java_org_rocksdb_ComparatorOptions_newComparatorOptions(
-    JNIEnv* env, jobject jobj) {
+jlong Java_org_rocksdb_ComparatorOptions_newComparatorOptions(
+    JNIEnv* env, jclass jcls) {
   auto comparator_opt = new rocksdb::ComparatorJniCallbackOptions();
-  rocksdb::ComparatorOptionsJni::setHandle(env, jobj, comparator_opt);
+  return reinterpret_cast<jlong>(comparator_opt);
 }
 
 /*
@@ -4091,7 +3991,6 @@ void Java_org_rocksdb_ComparatorOptions_setUseAdaptiveMutex(
 void Java_org_rocksdb_ComparatorOptions_disposeInternal(
     JNIEnv * env, jobject jobj, jlong jhandle) {
   delete reinterpret_cast<rocksdb::ComparatorJniCallbackOptions*>(jhandle);
-  rocksdb::ComparatorOptionsJni::setHandle(env, jobj, nullptr);
 }
 
 /////////////////////////////////////////////////////////////////////
@@ -4100,12 +3999,12 @@ void Java_org_rocksdb_ComparatorOptions_disposeInternal(
 /*
  * Class:     org_rocksdb_FlushOptions
  * Method:    newFlushOptions
- * Signature: ()V
+ * Signature: ()J
  */
-void Java_org_rocksdb_FlushOptions_newFlushOptions(
-    JNIEnv* env, jobject jobj) {
+jlong Java_org_rocksdb_FlushOptions_newFlushOptions(
+    JNIEnv* env, jclass jcls) {
   auto flush_opt = new rocksdb::FlushOptions();
-  rocksdb::FlushOptionsJni::setHandle(env, jobj, flush_opt);
+  return reinterpret_cast<jlong>(flush_opt);
 }
 
 /*
@@ -4138,5 +4037,4 @@ jboolean Java_org_rocksdb_FlushOptions_waitForFlush(
 void Java_org_rocksdb_FlushOptions_disposeInternal(
     JNIEnv * env, jobject jobj, jlong jhandle) {
   delete reinterpret_cast<rocksdb::FlushOptions*>(jhandle);
-  rocksdb::FlushOptionsJni::setHandle(env, jobj, nullptr);
 }

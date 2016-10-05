@@ -1,4 +1,4 @@
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -15,6 +15,8 @@
 // strings such as PRIu64
 // in fact, we could use that one
 #define ROCKSDB_PRIszt "zu"
+
+#define __declspec(S)
 
 #define ROCKSDB_NOEXCEPT noexcept
 
@@ -78,6 +80,7 @@ namespace port {
 // For use at db/file_indexer.h kLevelMaxIndex
 const int kMaxInt32 = std::numeric_limits<int32_t>::max();
 const uint64_t kMaxUint64 = std::numeric_limits<uint64_t>::max();
+const int64_t kMaxInt64 = std::numeric_limits<int64_t>::max();
 const size_t kMaxSizet = std::numeric_limits<size_t>::max();
 
 static const bool kLittleEndian = PLATFORM_IS_LITTLE_ENDIAN;

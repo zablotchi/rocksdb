@@ -1,6 +1,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
-//  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
+//  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
 //  This source code is licensed under the BSD-style license found in the
 //  LICENSE file in the root directory of this source tree. An additional grant
 //  of patent rights can be found in the PATENTS file in the same directory.
@@ -14,7 +14,7 @@ CompactionIterator::CompactionIterator(
     InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
     SequenceNumber last_sequence, std::vector<SequenceNumber>* snapshots,
     SequenceNumber earliest_write_conflict_snapshot, Env* env,
-    bool expect_valid_internal_key, Compaction* compaction,
+    bool expect_valid_internal_key, const Compaction* compaction,
     const CompactionFilter* compaction_filter, LogBuffer* log_buffer)
     : input_(input),
       cmp_(cmp),
@@ -423,15 +423,15 @@ void CompactionIterator::PrepareOutput() {
 inline SequenceNumber CompactionIterator::findEarliestVisibleSnapshot(
     SequenceNumber in, SequenceNumber* prev_snapshot) {
   assert(snapshots_->size());
-  SequenceNumber prev __attribute__((unused)) = 0;
+  SequenceNumber prev __attribute__((__unused__)) = kMaxSequenceNumber;
   for (const auto cur : *snapshots_) {
-    assert(prev <= cur);
+    assert(prev == kMaxSequenceNumber || prev <= cur);
     if (cur >= in) {
-      *prev_snapshot = prev;
+      *prev_snapshot = prev == kMaxSequenceNumber ? 0 : prev;
       return cur;
     }
     prev = cur;
-    assert(prev);
+    assert(prev < kMaxSequenceNumber);
   }
   *prev_snapshot = prev;
   return kMaxSequenceNumber;
