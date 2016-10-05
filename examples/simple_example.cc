@@ -17,6 +17,10 @@
 #include "main_test_loop.h"
 #include "common.h"
 #include <getopt.h>
+#include "db/db_test_util.h"
+#include <algorithm>
+#include <random>
+#include <chrono>
 // #include "db/table_cache.h"
 // #include "leveldb/stats.h"
 
@@ -36,7 +40,21 @@ __thread unsigned long * seeds;
 
 using namespace rocksdb;
 
+size_t kNumThreads = 4;
+size_t kTestSeconds = 10;
+size_t kInitial = 1024;
+size_t kRange = 2048;
+size_t kUpdatePercent = 0;
+size_t kBigValueSize = 256;
+size_t kPostInitWait = 1;
+
+#if defined(LPDXEON)
 std::string kDBPath = "/storage/rocksdb_simple_example";
+#elif defined(LPDQUAD)
+std::string kDBPath = "/dev/shm/rocksdb_simple_example";
+#elif defined(OPTERON)
+  std::string kDBPath = "/run/shm/rocksdb_simple_example";
+#endif  
 
 // int main() {
 //   DB* db;
@@ -83,13 +101,7 @@ std::string kDBPath = "/storage/rocksdb_simple_example";
 // namespace {
 RETRY_STATS_VARS_GLOBAL;
 
-size_t kNumThreads = 4;
-size_t kTestSeconds = 10;
-size_t kInitial = 1024;
-size_t kRange = 2048;
-size_t kUpdatePercent = 0;
-size_t kBigValueSize = 256;
-size_t kPostInitWait = 90;
+
 
 size_t print_vals_num = 100;
 size_t pf_vals_num = 1023;
@@ -136,6 +148,24 @@ inline Slice* BigSlice(size_t size) {
   char* buf = new char[size];
   return new Slice(buf, size);
 }
+
+void RangeScan(DB* db, ReadOptions& ro, const Slice& low, const Slice& high) {
+  Iterator* it = db->NewIterator(ro);
+  // int i = 0;
+  for (it->Seek(low); it->Valid(); it->Next()) {
+    // Slice result = ExtractUserKey(it->key());
+    // if (i == 100) {
+    //   break;
+    // }
+    // i++;
+
+    if (it->key().compare(high) > 0) {
+      break;
+    }
+  }
+  delete it;
+}
+
 
 struct IgorMTThread {
   // MTState* state;
@@ -197,6 +227,8 @@ void* IgorMTThreadBody(void* arg) {
   
   char* buf = new char[8];
   Slice key_slice;
+  char* buf2 = new char[8];
+  Slice key_slice2;
 
   std::string result;
   Status s;
@@ -217,50 +249,84 @@ void* IgorMTThreadBody(void* arg) {
 
 
 MEM_BARRIER;
-#ifndef NO_INIT_FILL
-// #ifdef INIT_SEQ
-  size_t j;
   if (id == 0) {
 
-    for (j = kRange - 1; j > kRange/2; j--) {
-      if (j == 7*kRange/8) {
+  size_t j;
+#if defined(INIT_UNIQUE_RANDOM)
+    std::vector<uint64_t> keys;
+    keys.reserve(kRange/2);
+    for (j = kRange/2 + 1; j < kRange; j++) {
+      keys.push_back(j);
+    }
+
+    printf("Shuffling keys...\n");
+    unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+    std::shuffle(keys.begin(), keys.end(), std::default_random_engine(seed));
+    printf("Inserting keys...\n");
+    for (j = 0; j < keys.size(); j++) {
+      if (j == kRange/8) {
         printf("inserting: 25/100 done, j = %zu \n", j);
-      } else if (j == 3 * kRange / 4) {
+      } else if (j == 2 * kRange / 8) {
         printf("inserting: 50/100 done\n");
-      } else if (j == 5 * kRange / 8) {
+      } else if (j == 3 * kRange / 8) {
         printf("inserting: 75/100 done\n");
       }
-      // memcpy(buf, &j, sizeof(j));
-      // key_slice.assign(buf, sizeof(j));
-      IntToSlice(key_slice, buf, j);
-      db->Put(wo, key_slice, *BigSlice(kBigValueSize));
 
-      // IntToSlice(key_slice, buf, kRange - j);
-      // db->Put(wo, key_slice, *BigSlice(kBigValueSize));
+      IntToSlice(key_slice, buf, keys[j]);
+      db->Put(wo, key_slice, *BigSlice(kBigValueSize));
     }
-    // wait for compaction to finish
+
+#elif defined(INIT_SEQ)
+// #ifdef INIT_SEQ
+    std::vector<uint64_t> keys;
+    keys.reserve(kRange/2);
+    for (j = kRange/2 + 1; j < kRange; j++) {
+      keys.push_back(j);
+    }
+
+    printf("Inserting keys...\n");
+
+    // for (j = kRange - 1; j > kRange/2; j--) {
+    //   if (j == 7*kRange/8) {
+    //     printf("inserting: 25/100 done, j = %zu \n", j);
+    //   } else if (j == 3 * kRange / 4) {
+    //     printf("inserting: 50/100 done\n");
+    //   } else if (j == 5 * kRange / 8) {
+    //     printf("inserting: 75/100 done\n");
+    //   }
+
+    for (j = keys.size()-1; j <= keys.size(); j--){
+
+      if (j == kRange/8) {
+        printf("inserting: 25/100 done, j = %zu \n", j);
+      } else if (j == 2 * kRange / 8) {
+        printf("inserting: 50/100 done\n");
+      } else if (j == 3 * kRange / 8) {
+        printf("inserting: 75/100 done\n");
+      }      
+      
+      IntToSlice(key_slice, buf, keys[j]);
+      // IntToSlice(key_slice, buf, j);
+      
+      db->Put(wo, key_slice, *BigSlice(kBigValueSize));
+    }
+#else // NO_INIT_FILL
+#endif // NO_INIT_FILL
+
+    printf("inserting: 100/100 done\n");
+
     struct timespec timeout;
     timeout.tv_sec = kPostInitWait;
     timeout.tv_nsec = 0;
     nanosleep(&timeout, NULL);
+
+    // char command[1000];
+    // strcpy(command, "lsof | wc -l; lsof > ~/openfiles");
+    // printf("command: %s\n", command);
+    // system(command);
+
+    // wait for compaction to finish
   }
-// #else // no INIT_SEQ
-//   int i;
-//   for(i = 0; i < num_elems_thread; i++) {
-//     key = (my_random(&(seeds[0]), &(seeds[1]), &(seeds[2])) % (rand_max + 1)) + rand_min;
-//     // snprintf(keybuf, sizeof(keybuf), "%d", key);
-//     // snprintf(valbuf, sizeof(valbuf), "%d", key);
-//     memcpy(buf, &i, sizeof(i)); 
-//     key_slice.assign(buf, sizeof(i));
-//     s = db->Get(ro, key_slice, &result);
-//     if (s.IsNotFound()) {
-//       db->Put(wo, key_slice, key_slice);
-//     } else {
-//       i--;
-//     }
-//   }
-// #endif // INIT_SEQ
-#endif // NO_INIT_FILL
 
   // THREAD_INIT_STATS_VARS
 
@@ -281,7 +347,8 @@ MEM_BARRIER;
     
 #ifdef SKEW9010
     if (likely(c < (uint32_t) (0.9 * UINT_MAX))) {
-      key = (key/10)*10; //make last digit 0 with 90% probability (hot data)
+      // key = (key/10)*10; //make last digit 0 with 90% probability (hot data)
+      key = (c % (rand_max/10)) + 0.45*rand_max + rand_min; // the middle 10% of the data is accessed with 90% prob
     }  
     c = (uint32_t)(my_random(&(seeds[0]),&(seeds[1]),&(seeds[2]))); 
 #endif // SKEW9010
@@ -289,7 +356,32 @@ MEM_BARRIER;
     // memcpy(buf, &key, sizeof(key));
     // key_slice.assign(buf, sizeof(key)); 
     IntToSlice(key_slice, buf, key);   
-                  
+
+#ifdef ONEWRITER
+    if (id == 0) {
+      START_TS(1);              
+        s = db->Put(wo, key_slice, *BigSlice(kBigValueSize));      
+        if(s.ok()) {               
+          END_TS(1, my_putting_count_succ);       
+          ADD_DUR(my_putting_succ);         
+          my_putting_count_succ++;          
+        }               
+      END_TS_ELSE(4, my_putting_count - my_putting_count_succ,    
+      my_putting_fail);         
+      my_putting_count++;
+    } else {
+      START_TS(0);              
+      s = db->Get(ro, key_slice, &result);      
+      if(!s.IsNotFound()) {               
+        END_TS(0, my_getting_count_succ);       
+        ADD_DUR(my_getting_succ);         
+        my_getting_count_succ++;          
+      }               
+      END_TS_ELSE(3, my_getting_count - my_getting_count_succ,    
+      my_getting_fail);         
+      my_getting_count++;
+    }  
+#else  // REGULAR EXECUTION PATH                      
     if (unlikely(c <= scale_put)) {                 
         START_TS(1);              
         s = db->Put(wo, key_slice, *BigSlice(kBigValueSize));      
@@ -311,10 +403,19 @@ MEM_BARRIER;
       }               
       END_TS_ELSE(5, my_removing_count - my_removing_count_succ, my_removing_fail);          
       my_removing_count++;            
-    } else {                 
+    } else {   
+#if defined(SCANS)
+    c = (uint32_t)(my_random(&(seeds[0]),&(seeds[1]),&(seeds[2])));
+
+    IntToSlice(key_slice2, buf2, key + 100);
+    // printf("Scannnig between %zu and %zu\n", key, key + (c % 20) + 10);
+    RangeScan(db, ro, key_slice, key_slice2);
+    my_getting_count += 100;           
+
+#else              
       START_TS(0);              
       s = db->Get(ro, key_slice, &result);      
-      if(!s.IsNotFound()) {               
+      if(s.ok()) {               
         END_TS(0, my_getting_count_succ);       
         ADD_DUR(my_getting_succ);         
         my_getting_count_succ++;          
@@ -322,7 +423,9 @@ MEM_BARRIER;
       END_TS_ELSE(3, my_getting_count - my_getting_count_succ,    
       my_getting_fail);         
       my_getting_count++;           
+#endif // SCANS
     }
+#endif // ONEWRITER
   }
 
   barrier_cross(&barrier);
@@ -371,6 +474,11 @@ void IgorMultiThreaded() {
   // Optimize RocksDB. This is the easiest way to get RocksDB to perform well
   options.IncreaseParallelism();
   // options.OptimizeLevelStyleCompaction();
+#ifdef BIGMEM
+  options.write_buffer_size = 1024 * 1024 * 1024;
+#else
+  options.write_buffer_size = 128 * 1024 * 1024;
+#endif
   // create the DB if it's not already present
   options.create_if_missing = true;
 
@@ -519,6 +627,15 @@ void IgorMultiThreaded() {
   RR_PRINT_UNPROTECTED(RAPL_PRINT_POW);
   RR_PRINT_CORRECTED();
   RETRY_STATS_PRINT(total, putting_count_total, removing_count_total, putting_count_total_succ + removing_count_total_succ);
+
+  // print number of files at each level
+  std::string property;
+  int files;
+  for (int level = 0; level < options.num_levels; level ++) {
+    files = db->GetProperty(
+        "rocksdb.num-files-at-level" + NumberToHumanString(level), &property);
+    std::cout << "files at level " << level << ": " << property << std::endl;
+  }
 
   delete db;
 
@@ -684,5 +801,11 @@ int main(int argc, char** argv) {
 #endif
   
   IgorMultiThreaded();
+
+  char command[1000];
+  // strcpy(command, "rm -rf ");
+  // strcat(command, kDBPath.c_str());
+  // printf("command: %s\n", command);
+  // system(command);
   return 0;
 }
